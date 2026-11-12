@@ -343,6 +343,138 @@ test("Herdr identity needs no installed Pi bridge and explicit resources are pre
 	assert.equal(disabled.GENTLE_SHELL_HERDR_REPORTER, undefined);
 });
 
+// Orca tests model the pane env only: no hook server is contacted. The fake pi
+// records launch args; stdin/stdout TTY-ness is forced by a preload.
+function orcaFixture(t: test.TestContext) {
+	const f = fixture(t);
+	const sourceDir = join(f.root, "orca-source-agent");
+	const extensionsDir = join(sourceDir, "extensions");
+	mkdirSync(extensionsDir, { recursive: true });
+	const status = join(extensionsDir, "orca-agent-status.ts");
+	writeFileSync(status, "export default function () {}\n");
+	const titlebar = join(extensionsDir, "orca-titlebar-spinner.ts");
+	writeFileSync(titlebar, "export default function () {}\n");
+	writeFileSync(join(extensionsDir, "orca-prefill.ts"), "export default function () {}\n");
+	const preload = join(f.root, "orca-tty.cjs");
+	writeFileSync(preload, [
+		"process.stdin.isTTY = process.env.TEST_STDIN_TTY === '1';",
+		"process.stdout.isTTY = process.env.TEST_STDOUT_TTY === '1';",
+	].join("\n"));
+	const env: NodeJS.ProcessEnv = {
+		...f.env,
+		ORCA_AGENT_HOOK_PORT: "4321", ORCA_AGENT_HOOK_TOKEN: "token",
+		ORCA_PI_SOURCE_AGENT_DIR: sourceDir,
+		TEST_STDIN_TTY: "1", TEST_STDOUT_TTY: "1",
+	};
+	for (const key of ["GENTLE_PI_AGENTS_CHILD", "PI_CODING_AGENT_DIR", "ORCA_PI_STATUS_EXTENSION",
+		"ORCA_GENTLE_SHELL_STATUS_EXTENSION", "HERDR_ENV", "HERDR_SOCKET_PATH", "HERDR_PANE_ID"]) delete env[key];
+	const launch = (args: string[] = [], overrides: NodeJS.ProcessEnv = {}) => {
+		const result = spawnSync(process.execPath, ["--require", preload, binPath, ...args], {
+			encoding: "utf8", env: { ...env, ...overrides }, cwd: f.root,
+		});
+		assert.equal(result.status, 0, result.stderr);
+		// The launcher's own first-run notices are unrelated; Orca must add none.
+		assert.doesNotMatch(result.stderr, /orca/i);
+		return JSON.parse(result.stdout) as { args: string[] };
+	};
+	return { ...f, sourceDir, status, titlebar, env, launch };
+}
+
+test("Orca TUI launch loads the status extension from each path source in priority order", (t) => {
+	const f = orcaFixture(t);
+	const alias = join(f.root, "alias", "orca-agent-status.ts");
+	mkdirSync(dirname(alias), { recursive: true });
+	symlinkSync(f.status, alias);
+	const pi = join(f.root, "orca-pi-status.ts");
+	const gentle = join(f.root, "orca-gentle-status.ts");
+	writeFileSync(pi, "export default function () {}\n");
+	writeFileSync(gentle, "export default function () {}\n");
+	const orcaArgs = (args: string[]) => args.flatMap((arg, i) => arg === "-e" && /orca-[^/\\]*\.ts$/.test(args[i + 1]) ? [arg, args[i + 1]] : []);
+	assert.deepEqual(orcaArgs(f.launch().args), ["-e", realpathSync(f.status)]);
+	assert.deepEqual(orcaArgs(f.launch([], { ORCA_PI_SOURCE_AGENT_DIR: undefined, ORCA_PI_STATUS_EXTENSION: alias }).args), ["-e", realpathSync(f.status)]);
+	assert.deepEqual(orcaArgs(f.launch([], { ORCA_PI_STATUS_EXTENSION: pi }).args), ["-e", realpathSync(pi)]);
+	assert.deepEqual(orcaArgs(f.launch([], { ORCA_PI_STATUS_EXTENSION: pi, ORCA_GENTLE_SHELL_STATUS_EXTENSION: gentle }).args), ["-e", realpathSync(gentle)]);
+	// An unreadable preferred source falls through to the next one.
+	assert.deepEqual(orcaArgs(f.launch([], { ORCA_GENTLE_SHELL_STATUS_EXTENSION: join(f.root, "missing.ts"), ORCA_PI_STATUS_EXTENSION: pi }).args), ["-e", realpathSync(pi)]);
+});
+
+test("Orca status extension is skipped for every opt-out and non-interactive launch", (t) => {
+	const f = orcaFixture(t);
+	const canonical = realpathSync(f.status);
+	for (const args of [["--no-extensions"], ["-ne"], ["-p", "prompt"], ["--print", "prompt"],
+		["--mode", "rpc"], ["--mode", "json"], ["--mode=json"], ["--export", "session.jsonl"], ["--list-models"], ["-v"],
+		["list"], ["mcp"]]) {
+		assert.ok(!f.launch(args).args.includes(canonical), JSON.stringify(args));
+	}
+	for (const overrides of [{ GENTLE_PI_AGENTS_CHILD: "1" }, { TEST_STDIN_TTY: "0" }, { TEST_STDOUT_TTY: "0" }]) {
+		assert.ok(!f.launch([], overrides).args.includes(canonical), JSON.stringify(overrides));
+	}
+	assert.ok(f.launch(["--mode", "text"]).args.includes(canonical));
+});
+
+test("Orca status extension is not duplicated when the user already passed the same file", (t) => {
+	const f = orcaFixture(t);
+	const alias = join(f.root, "status-alias.ts");
+	symlinkSync(f.status, alias);
+	for (const flag of ["-e", "--extension"]) {
+		const args = f.launch([flag, alias]).args;
+		assert.ok(args.includes(alias));
+		assert.ok(!args.includes(realpathSync(f.status)), flag);
+	}
+});
+
+test("Orca launch without the hook coordinates or a readable extension is the ordinary launch and never warns about Orca", (t) => {
+	const f = orcaFixture(t);
+	const canonical = realpathSync(f.status);
+	for (const overrides of [{ ORCA_AGENT_HOOK_PORT: undefined }, { ORCA_AGENT_HOOK_PORT: "" },
+		{ ORCA_AGENT_HOOK_TOKEN: undefined }, { ORCA_AGENT_HOOK_TOKEN: "" }]) {
+		assert.ok(!f.launch([], overrides).args.includes(canonical), JSON.stringify(overrides));
+	}
+	// launch() already asserts a zero exit and no Orca-related stderr.
+	const directory = join(f.root, "a-directory");
+	mkdirSync(directory);
+	for (const overrides of [{ ORCA_PI_SOURCE_AGENT_DIR: join(f.root, "nowhere") },
+		{ ORCA_PI_SOURCE_AGENT_DIR: undefined, ORCA_PI_STATUS_EXTENSION: directory }]) {
+		assert.deepEqual(extensionPaths(f.launch([], overrides).args).filter((path) => /orca-[^/\\]*\.ts$/.test(path)), [], JSON.stringify(overrides));
+	}
+	if (process.platform !== "win32" && process.getuid?.() !== 0) {
+		chmodSync(f.status, 0o000);
+		try {
+			assert.ok(!f.launch().args.includes(canonical));
+		} finally {
+			chmodSync(f.status, 0o644);
+		}
+	}
+});
+
+test("Orca launch never loads the titlebar or prefill extensions", (t) => {
+	const f = orcaFixture(t);
+	const loaded = extensionPaths(f.launch().args);
+	assert.ok(loaded.includes(realpathSync(f.status)));
+	assert.ok(!loaded.some((path) => /orca-titlebar-spinner|orca-prefill/.test(path)));
+	const viaTitlebar = extensionPaths(f.launch([], { ORCA_PI_SOURCE_AGENT_DIR: undefined, ORCA_PI_STATUS_EXTENSION: f.titlebar }).args);
+	assert.deepEqual(viaTitlebar.filter((path) => /orca-[^/\\]*\.ts$/.test(path)), [realpathSync(f.titlebar)]);
+});
+
+test("Orca status extension coexists with Herdr's bridge arguments", (t) => {
+	const f = herdrFixture(t);
+	const sourceDir = join(f.root, "orca-source");
+	const status = join(sourceDir, "extensions", "orca-agent-status.ts");
+	mkdirSync(dirname(status), { recursive: true });
+	writeFileSync(status, "export default function () {}\n");
+	const orcaEnv = { ORCA_AGENT_HOOK_PORT: "4321", ORCA_AGENT_HOOK_TOKEN: "token", ORCA_PI_SOURCE_AGENT_DIR: sourceDir };
+	const both = f.launchWithEnv([], { ...orcaEnv, GENTLE_SHELL_HERDR_REPORTER: "1" });
+	assert.ok(extensionPaths(both.args).includes(realpathSync(status)));
+	assert.equal(both.GENTLE_SHELL_HERDR_REPORTER, "1");
+	// With Herdr's bridge selected, both plans contribute their own -e.
+	const selectedBridge = join(f.gentleShellHome, "extensions", "herdr-agent-state.ts");
+	mkdirSync(dirname(selectedBridge), { recursive: true });
+	writeFileSync(selectedBridge, "export default function () {}\n");
+	const bridged = extensionPaths(f.launchWithEnv([], orcaEnv).args);
+	assert.ok(bridged.includes(realpathSync(selectedBridge)));
+	assert.ok(bridged.includes(realpathSync(status)));
+});
+
 test("Pi real resource loader deduplicates the bridge across discovery, explicit files and package directories", async (t) => {
 	const { DefaultResourceLoader, SettingsManager, createEventBus } = await import("@earendil-works/pi-coding-agent");
 	for (const scenario of ["discovered", "explicit", "directory"] as const) {

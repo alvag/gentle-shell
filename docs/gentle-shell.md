@@ -6,6 +6,8 @@ For development, use [ODD and feature recovery](readme-reference.md#organic-driv
 
 Source map: [shell extension](../extensions/gentle-shell.ts), [shell bar](../lib/shell-bar.ts), [changes model](../lib/shell-changes.ts), [changes view](../lib/shell-changes-view.ts), [usage model](../lib/shell-usage.ts), [usage view](../lib/shell-usage-view.ts), [agents extension](../extensions/gentle-agents.ts), and [agent runner](../lib/agents-runner.ts).
 
+Orca panes: an interactive launch also loads Orca's status extension for pane status (reported as `pi`); see [Orca agent status](readme-reference.md#orca-agent-status).
+
 ## Web and product design guidance
 
 Use `/skill:gentle-ui-design` for web and product interface guidance or a read-only critique. Ask it, for example, to improve how people find and compare records or to assess a narrow-screen layout. It works with the current project's design system and adds no validation hooks. When you ask for HTML canvas artboards, `gentle-design` owns the delivery and pairs with this skill for UX quality; use `gentle-ai-tui-design` for terminal interfaces.

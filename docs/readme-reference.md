@@ -682,6 +682,14 @@ Tradeoffs of a custom agent name on Herdr 0.9.3: Herdr keeps no session referenc
 
 The Gentle Shell reporter requires `HERDR_ENV=1`, a nonempty `HERDR_PANE_ID`, an existing Unix socket at `HERDR_SOCKET_PATH`, and terminal stdin/stdout. It is skipped for `--no-extensions`/`-ne`, print/JSON/RPC modes (including interactive RPC hosts), export/model listing, package commands, and Gentle Agents children; the launcher also removes an inherited `GENTLE_SHELL_HERDR_REPORTER` there. `--mode text` still permits an interactive TUI. Linked and explicit custom homes keep their own resource policy, so they keep whatever Herdr integration that home discovers and show as `pi`. User-supplied extension paths remain unchanged, including under `--no-extensions`.
 
+### Orca agent status
+
+Inside an Orca pane (`ORCA_AGENT_HOOK_PORT` and `ORCA_AGENT_HOOK_TOKEN` both nonempty), an interactive launch passes Orca's status extension to Pi as `-e <canonical path>`, so Orca shows working, waiting and done states for the pane. The first readable regular file wins: `ORCA_GENTLE_SHELL_STATUS_EXTENSION` (reserved for a future Orca `gentle-shell` agent kind), `ORCA_PI_STATUS_EXTENSION`, then `$ORCA_PI_SOURCE_AGENT_DIR/extensions/orca-agent-status.ts`. Only that file is loaded, never Orca's titlebar or prefill extensions.
+
+It uses the same filters as the Herdr bridge: skipped for Pi subcommands and `mcp`, Gentle Agents children, non-TTY stdin/stdout, `--no-extensions`/`-ne`, `--print`/`-p`, `--export`, `--list-models`, `-v`, any `--mode` other than `text`, and when you already passed `-e`/`--extension` for the same file. A missing or unreadable file never fails or warns on the launch. Unlike Herdr, linked and custom homes are included: Pi deduplicates the canonical path, so a home that already discovers the file is unaffected. It coexists with Herdr; both can contribute arguments.
+
+Identity caveat: Orca's current extension reports the agent as Pi, so the row reads `pi` until Orca supports a `gentle-shell` kind and exposes `ORCA_GENTLE_SHELL_STATUS_EXTENSION`.
+
 ### Herdr native working detection
 
 Outside Herdr, the petal prompt frame replaces Pi's standard loader row. Inside a Herdr pane (`HERDR_ENV=1`, root sessions only), Gentle Shell keeps Pi's native `⠋ Working...` row visible, because Herdr's native Pi manifest detects activity from that row and otherwise reports idle during real runs. Pi shows the row only while the agent is working, so no local `pi.toml` override is needed.

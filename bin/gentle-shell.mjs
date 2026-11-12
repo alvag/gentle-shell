@@ -612,6 +612,59 @@ function herdrLaunchPlan(home, args, loadsOwnPackage) {
 	return selected.length > 0 ? { extensionArgs: selected, reporter: false } : { extensionArgs: [], reporter: true };
 }
 
+const ORCA_STATUS_FILE = "orca-agent-status.ts";
+
+// First candidate that is a readable regular file, as its canonical path.
+function firstReadableFile(candidates) {
+	for (const candidate of candidates) {
+		if (!candidate) continue;
+		try {
+			if (!statSync(candidate).isFile()) continue;
+			accessSync(candidate, fsConstants.R_OK);
+			return realpathSync(candidate);
+		} catch {
+			// A missing/unreadable status extension never prevents the launch.
+		}
+	}
+	return undefined;
+}
+
+// Orca agent status for an interactive launch inside an Orca pane. Orca's
+// status extension (orca-agent-status.ts) posts lifecycle hooks to
+// ORCA_AGENT_HOOK_PORT/TOKEN, but Orca only loads it for a plain `pi`; this
+// launcher runs Pi with its own agent dir, so it passes that one file as -e.
+// Candidates in order: ORCA_GENTLE_SHELL_STATUS_EXTENSION (future Orca
+// gentle-shell kind), ORCA_PI_STATUS_EXTENSION, then
+// $ORCA_PI_SOURCE_AGENT_DIR/extensions/orca-agent-status.ts. Only that file is
+// loaded, never Orca's titlebar/prefill extensions. Same opt-outs as Herdr.
+// Unlike herdrLaunchPlan there is deliberately no `home.mode === "isolated"`
+// gate: Herdr needs it because it swaps reporters, whereas here a home that
+// already discovers the same file only sees a canonical-path duplicate, which
+// Pi dedupes, so a linked or custom home is harmless. Best-effort and silent.
+function orcaLaunchPlan(args) {
+	const none = { extensionArgs: [] };
+	const env = process.env;
+	if (args.piSubcommand !== undefined || args.passthrough[0] === "mcp") return none;
+	if (!env.ORCA_AGENT_HOOK_PORT?.trim() || !env.ORCA_AGENT_HOOK_TOKEN?.trim()) return none;
+	if (env.GENTLE_PI_AGENTS_CHILD === "1" || !process.stdin.isTTY || !process.stdout.isTTY) return none;
+	const forwarded = args.passthrough;
+	if (forwarded.some((arg) => ["--no-extensions", "-ne", "--print", "-p", "--export", "--list-models", "-v"].includes(arg))) return none;
+	if (forwarded.some((arg, i) => (arg === "--mode" && forwarded[i + 1] !== "text") || arg.startsWith("--mode="))) return none;
+	const sourceDir = env.ORCA_PI_SOURCE_AGENT_DIR?.trim();
+	const status = firstReadableFile([
+		env.ORCA_GENTLE_SHELL_STATUS_EXTENSION?.trim(),
+		env.ORCA_PI_STATUS_EXTENSION?.trim(),
+		sourceDir ? join(sourceDir, "extensions", ORCA_STATUS_FILE) : undefined,
+	]);
+	if (status === undefined) return none;
+	const alreadyPassed = forwarded.some((arg, i) => {
+		if (arg !== "-e" && arg !== "--extension") return false;
+		const next = forwarded[i + 1];
+		return next !== undefined && firstReadableFile([next]) === status;
+	});
+	return alreadyPassed ? none : { extensionArgs: ["-e", status] };
+}
+
 // Real-fs adapter for discoverLooseExtensionEntries (lib/gentle-shell-launcher.ts):
 // statSync-based isFile/isDirectory (not readdirSync's Dirent, which uses
 // lstat and so would treat a symlinked file or directory as neither) so a
@@ -2495,6 +2548,7 @@ async function main() {
 	// buildPiInvocation injects this package unless the home's own declared
 	// gentle-pi is used as-is.
 	const herdr = herdrLaunchPlan(home, args, takeOver || declaration === undefined);
+	const orca = orcaLaunchPlan(args);
 	const invocation = buildPiInvocation({
 		runtime,
 		home,
@@ -2503,7 +2557,7 @@ async function main() {
 		takeOver,
 		otherPackagePaths,
 		looseExtensionEntries,
-		passthrough: [...herdr.extensionArgs, ...passthrough],
+		passthrough: [...herdr.extensionArgs, ...orca.extensionArgs, ...passthrough],
 		piSubcommand: args.piSubcommand,
 		baseEnv: bundledEnv ?? process.env,
 		bundled: Boolean(bundled),
